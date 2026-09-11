@@ -29,6 +29,22 @@ function sendJson(response, status, payload) {
 }
 
 function readJson(request) {
+  try {
+    if (request.body !== undefined) {
+      if (Buffer.isBuffer(request.body)) {
+        return Promise.resolve(JSON.parse(request.body.toString("utf8").replace(/^\uFEFF/, "")));
+      }
+      if (typeof request.body === "string") {
+        return Promise.resolve(JSON.parse(request.body.replace(/^\uFEFF/, "")));
+      }
+      return Promise.resolve(request.body || {});
+    }
+  } catch {
+    const error = new Error("Request body must be valid JSON");
+    error.statusCode = 400;
+    return Promise.reject(error);
+  }
+
   return new Promise((resolve, reject) => {
     let body = "";
     request.on("data", (chunk) => {
@@ -382,8 +398,10 @@ const server = http.createServer(async (request, response) => {
   }
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`ARCH SPOT Mission Monitor running at http://127.0.0.1:${PORT}`);
-});
+if (require.main === module) {
+  server.listen(PORT, "127.0.0.1", () => {
+    console.log(`ARCH SPOT Mission Monitor running at http://127.0.0.1:${PORT}`);
+  });
+}
 
-module.exports = { server, missionResult, missionView, validateWebhook };
+module.exports = { server, handleApi, sendJson, missionResult, missionView, validateWebhook };

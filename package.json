@@ -5,7 +5,8 @@
   "description": "ARCH SPOT mission monitoring prototype based on the SPOT ARCH BRD",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check server-data.js && node --check public/app.js"
+    "check": "node --check server.js && node --check server-data.js && node --check api/index.js && node --check public/app.js && node tests/vercel-smoke.js",
+    "test:vercel": "node tests/vercel-smoke.js"
   },
   "engines": {
     "node": ">=18"

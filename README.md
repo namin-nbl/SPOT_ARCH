@@ -12,6 +12,12 @@ npm.cmd start
 
 Open [http://127.0.0.1:4173](http://127.0.0.1:4173).
 
+## Deploy to Vercel
+
+Import the GitHub repository into Vercel and use the **Other** framework preset. No build or output-directory override is required. Static files are served from `public/`, while `vercel.json` routes `/api/*` requests to the Node.js function in `api/index.js`.
+
+The included data store is in memory. It is appropriate for this interactive prototype, but webhook-created records and ticket-status changes are not guaranteed to persist between serverless invocations. Connect an approved persistent data store before production use.
+
 To run syntax checks:
 
 ```powershell
