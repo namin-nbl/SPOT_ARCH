@@ -1,6 +1,6 @@
 # ARCH SPOT Mission Monitor
 
-A self-contained, interactive implementation of the SPOT monitoring experience described in `SPOT ARCH BRD.docx`. It models the approved Orbit → Litmus → ARCH boundary while keeping environment-specific credentials and endpoint choices outside the prototype.
+A self-contained, interactive implementation of the SPOT monitoring experience described in `SPOT ARCH BRD.docx`. It models the Orbit-to-ARCH boundary while keeping environment-specific credentials and endpoint choices outside the codebase.
 
 ## Run locally
 
@@ -16,7 +16,7 @@ Open [http://127.0.0.1:4173](http://127.0.0.1:4173).
 
 Import the GitHub repository into Vercel and use the **Other** framework preset. No build or output-directory override is required. Static files are served from `public/`, while `vercel.json` routes `/api/*` requests to the Node.js function in `api/index.js`.
 
-The included data store is in memory. It is appropriate for this interactive prototype, but webhook-created records and ticket-status changes are not guaranteed to persist between serverless invocations. Connect an approved persistent data store before production use.
+The included UI data store is in memory. It is appropriate for this interactive prototype, but webhook-created records and ticket-status changes are not guaranteed to persist between serverless invocations. The webhook framework can forward each complete event to a durable HTTP sink; configure that sink before production use.
 
 To run syntax checks:
 
@@ -34,7 +34,9 @@ npm.cmd run check
 - Mission details with required summary fields, plant-local timestamps, Orbit trace IDs, inspection points, possible causes, recommendations, attachments, and related alerts
 - Mission-linked anomaly ticket drawer with status workflow updates
 - Attachment preview and download behavior
-- Local Orbit webhook endpoint with validation, normalization, safe retry/deduplication, correlation logging, and anomaly-ticket creation
+- Boston Dynamics Orbit webhook ingestion with HMAC-SHA256 verification, replay-window enforcement, envelope validation, retry-safe deduplication, raw-event audit records, action normalization, and anomaly-ticket creation
+- Robot-to-plant mapping with a pending-mapping path that captures valid events without assigning them to the wrong plant
+- Optional durable HTTP event sink with idempotency keys for serverless deployments
 - Explicit unavailable/pending states so missing data is not represented as a valid zero
 
 ## Local API
@@ -45,14 +47,16 @@ npm.cmd run check
 | `GET` | `/api/missions/:id` | Mission summary, inspections, artifacts, and related alerts |
 | `GET` | `/api/alerts` | Filtered SPOT ticket list |
 | `PATCH` | `/api/alerts/:id` | Update a local ticket workflow status |
-| `POST` | `/api/webhooks/orbit` | Validate and process an Orbit-style event |
+| `POST` | `/api/webhooks/orbit` | Authenticate, capture, and process an Orbit action event |
+| `GET` | `/api/webhooks/orbit/status` | Webhook configuration, storage mode, and capture counters |
+| `GET` | `/api/webhooks/orbit/events` | Recent event metadata (admin bearer token required) |
 | `GET` | `/api/integration/logs` | Correlated processing trace |
 | `GET` | `/api/health` | Integration service health summary |
 
-All data is intentionally in-memory. Restarting the server restores the curated BRD-aligned sample state.
+The curated UI data is intentionally in-memory. Restarting the local server restores the sample state. See [the Orbit webhook setup guide](docs/orbit-webhook-setup.md) for environment variables, Orbit registration, signed local testing, and the durable sink contract.
 
 ## Production integration boundary
 
-The BRD leaves the Orbit version/endpoints, subscribed event types, final field mapping, anomaly thresholds and severity rules, secret management, retry/dead-letter behavior, retention, ticket fields, and media access policy open. The local webhook and generated artifacts demonstrate those contracts but do not guess production credentials or Niagara infrastructure details.
+The receiver implements Orbit's documented `uuid` / `type` / `time` / `data` envelope and the `ACTION_COMPLETED` and `ACTION_COMPLETED_WITH_ALERT` events. The `data` value is retained as the complete `run_event`; the projection layer only derives fields needed by this prototype and does not invent anomaly causes or maintenance recommendations.
 
-Before deployment, connect the API handlers to the approved Litmus-to-ARCH transport and persistence layer, enforce ARCH RBAC and plant scoping server-side, replace the sample anomaly rules with approved thresholds, and use the enterprise secret and media-retention controls.
+Before production use, connect `ORBIT_EVENT_SINK_URL` to an approved durable store, enforce ARCH RBAC and plant scoping server-side, define retention and media retrieval policies, and replace the prototype ticket-severity rule with the approved business mapping.

@@ -22,7 +22,11 @@ module.exports = async function handler(request, response) {
     }
   } catch (error) {
     if (!response.writableEnded) {
-      sendJson(response, error.statusCode || 500, { error: error.message || "Unexpected server error" });
+      sendJson(response, error.statusCode || 500, {
+        error: error.message || "Unexpected server error",
+        ...(error.code ? { code: error.code } : {}),
+        ...(error.details ? { details: error.details } : {}),
+      });
     }
   }
 };

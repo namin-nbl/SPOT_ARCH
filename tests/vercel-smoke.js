@@ -1,5 +1,11 @@
 const assert = require("node:assert/strict");
 const { Readable } = require("node:stream");
+const { createOrbitSignature } = require("../orbit/signature");
+
+const orbitSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+process.env.ORBIT_WEBHOOK_SECRET = orbitSecret;
+process.env.ORBIT_ROBOT_PLANT_MAP = JSON.stringify({ "spot-blm-01": "BLM" });
+process.env.ORBIT_ADMIN_TOKEN = "vercel-smoke-admin-token";
 const handler = require("../api/index");
 
 class MockResponse {
@@ -21,14 +27,14 @@ class MockResponse {
   }
 }
 
-async function invoke(path, { method = "GET", query = {}, body } = {}) {
-  const request = Readable.from([]);
+async function invoke(path, { method = "GET", query = {}, body, headers = {} } = {}) {
+  const bodyText = body === undefined ? "" : JSON.stringify(body);
+  const request = Readable.from(bodyText ? [Buffer.from(bodyText)] : []);
   const search = new URLSearchParams({ path, ...query });
   request.method = method;
   request.url = `/api?${search}`;
-  request.headers = { host: "spot-arch.vercel.app", "content-type": "application/json" };
+  request.headers = { host: "spot-arch.vercel.app", "content-type": "application/json", ...headers };
   request.query = { path, ...query };
-  if (body !== undefined) request.body = body;
 
   const response = new MockResponse();
   await handler(request, response);
@@ -57,24 +63,53 @@ async function run() {
   assert.match(attachment.headers["Content-Type"], /image\/svg\+xml/);
 
   const event = {
-    eventId: "evt-vercel-smoke-001",
-    eventType: "action.completed_with_alert",
-    eventTime: "2026-09-11T16:00:00Z",
+    uuid: "evt-vercel-smoke-001",
+    type: "ACTION_COMPLETED_WITH_ALERT",
+    time: "2026-09-11T16:00:00Z",
     data: {
-      missionId: "SPOT-VERCEL-SMOKE-001",
-      robotId: "SPOT-BD-52240",
-      plantId: "BLM",
-      status: "Complete",
-      inspections: [{ id: "IP-VS-1", name: "Smoke test point", type: "Thermal", result: "Fail" }],
+      uuid: "run-event-vercel-smoke-001",
+      runUuid: "run-vercel-smoke-001",
+      robotHostname: "spot-blm-01",
+      missionName: "Vercel smoke route",
+      actionName: "Thermal smoke test point",
+      missionStatus: "SUCCESS",
+      dataCaptures: [{
+        uuid: "capture-vercel-smoke-001",
+        channelName: "thermal",
+        keyResults: [{ name: "Temperature", value: 90.2, units: "C" }],
+      }],
     },
   };
-  const created = await invoke("webhooks/orbit", { method: "POST", body: event });
-  assert.equal(created.statusCode, 201);
+  const timestamp = String(Date.now());
+  const orbitHeaders = { "orbit-signature": `t=${timestamp},v1=${createOrbitSignature(event, timestamp, orbitSecret)}` };
+  const created = await invoke("webhooks/orbit", { method: "POST", body: event, headers: orbitHeaders });
+  assert.equal(created.statusCode, 202);
   assert.equal(json(created).tickets.length, 1);
 
-  const replay = await invoke("webhooks/orbit", { method: "POST", body: event });
+  const invalidSignature = await invoke("webhooks/orbit", {
+    method: "POST",
+    body: { ...event, uuid: "evt-vercel-invalid-signature" },
+    headers: { "orbit-signature": `t=${timestamp},v1=${"0".repeat(64)}` },
+  });
+  assert.equal(invalidSignature.statusCode, 401);
+  assert.equal(json(invalidSignature).code, "invalid_signature");
+
+  const replay = await invoke("webhooks/orbit", { method: "POST", body: event, headers: orbitHeaders });
   assert.equal(replay.statusCode, 200);
   assert.equal(json(replay).duplicate, true);
+
+  const status = await invoke("webhooks/orbit/status");
+  assert.equal(status.statusCode, 200);
+  assert.equal(json(status).metrics.captured, 1);
+
+  const unauthorizedEvents = await invoke("webhooks/orbit/events");
+  assert.equal(unauthorizedEvents.statusCode, 401);
+  const events = await invoke("webhooks/orbit/events", {
+    headers: { authorization: "Bearer vercel-smoke-admin-token" },
+  });
+  assert.equal(events.statusCode, 200);
+  assert.equal(json(events).data.length, 1);
+  assert.equal(json(events).data[0].payload, undefined);
 
   const missing = await invoke("does-not-exist");
   assert.equal(missing.statusCode, 404);

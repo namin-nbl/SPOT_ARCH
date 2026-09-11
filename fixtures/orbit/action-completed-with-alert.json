@@ -1,0 +1,26 @@
+{
+  "uuid": "74267d41-cba8-46b5-b9ec-cdc361d3062c",
+  "type": "ACTION_COMPLETED_WITH_ALERT",
+  "time": "2026-09-11T18:42:31.125Z",
+  "data": {
+    "uuid": "b39fd6c9-b6fa-4a9d-8840-890399861f42",
+    "runUuid": "778bb71e-5ba6-4d66-9725-6a0192d3fccd",
+    "actionName": "Pipeline Leak Detection Action",
+    "missionName": "Pipeline Inspection Mission",
+    "robotHostname": "spot-blm-01",
+    "time": "2026-09-11T18:42:30.908Z",
+    "dataCaptures": [
+      {
+        "uuid": "4bdc55e8-ed82-46b9-b40f-83d73dddaed2",
+        "time": "2026-09-11T18:42:30.908Z",
+        "channelName": "leak-source",
+        "dataUrl": "/api/v0/run_captures/4bdc55e8-ed82-46b9-b40f-83d73dddaed2",
+        "keyResults": [
+          { "name": "SPL At Source", "units": "dB", "value": 55.43 },
+          { "name": "SNR Value", "value": 242 },
+          { "name": "SNR Threshold", "value": 200 }
+        ]
+      }
+    ]
+  }
+}

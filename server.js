@@ -1,14 +1,17 @@
 const http = require("node:http");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { URL } = require("node:url");
 const { plants, missions, alerts, integrationLogs } = require("./server-data");
+const { loadOrbitConfig } = require("./orbit/config");
+const { normalizeOrbitEvent, validateOrbitEnvelope } = require("./orbit/normalize");
+const { verifyOrbitSignature } = require("./orbit/signature");
+const { deliverToEventSink, orbitEventStore } = require("./orbit/store");
 
 const PORT = Number(process.env.PORT || 4173);
 const PUBLIC_DIR = path.join(__dirname, "public");
-const VALID_MISSION_STATUSES = new Set(["Not Started", "In Progress", "Complete"]);
 const VALID_TICKET_STATUSES = new Set(["Open", "In Review", "Resolved"]);
-const processedEventIds = new Set(missions.map((mission) => mission.eventId));
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -160,47 +163,6 @@ function addLog({ eventId, correlationId, stage, outcome, detail }) {
   });
 }
 
-function validateWebhook(payload) {
-  const errors = [];
-  if (!payload.eventId) errors.push("eventId is required");
-  if (!payload.eventType) errors.push("eventType is required");
-  if (!payload.eventTime || Number.isNaN(Date.parse(payload.eventTime))) errors.push("eventTime must be a valid timestamp");
-  if (!payload.data?.missionId) errors.push("data.missionId is required");
-  if (!payload.data?.robotId) errors.push("data.robotId is required");
-  if (!plants.some((plant) => plant.id === payload.data?.plantId)) errors.push("data.plantId must identify an approved plant");
-  if (!VALID_MISSION_STATUSES.has(payload.data?.status)) errors.push("data.status is invalid");
-  if (!Array.isArray(payload.data?.inspections)) errors.push("data.inspections must be an array");
-  return errors;
-}
-
-function normalizeWebhook(payload) {
-  const data = payload.data;
-  return {
-    id: data.missionId,
-    eventId: payload.eventId,
-    runId: data.runId || null,
-    actionId: data.actionId || null,
-    robotId: data.robotId,
-    plantId: data.plantId,
-    startTime: data.startTime || payload.eventTime,
-    endTime: data.endTime || null,
-    status: data.status,
-    route: data.route || "Unspecified route",
-    inspections: data.inspections.map((item, index) => ({
-      id: item.id || `IP-AUTO-${index + 1}`,
-      name: item.name || "Unnamed inspection point",
-      type: item.type || "Other",
-      result: item.result === "Pass" || item.result === "Fail" ? item.result : null,
-      possibleCauses: Array.isArray(item.possibleCauses) ? item.possibleCauses : [],
-      recommendations: Array.isArray(item.recommendations) ? item.recommendations : [],
-      reading: item.reading ?? null,
-    })),
-    attachments: [],
-    source: "Orbit via Litmus",
-    correlationId: data.correlationId || `corr-${Date.now().toString(36)}-arch`,
-  };
-}
-
 function createTicketsForMission(mission) {
   const created = [];
   for (const point of mission.inspections.filter((item) => item.result === "Fail")) {
@@ -225,6 +187,59 @@ function createTicketsForMission(mission) {
   return created;
 }
 
+function projectOrbitMission(incoming) {
+  let mission = missions.find((item) => item.runId === incoming.runId || item.id === incoming.id);
+  if (!mission) {
+    mission = incoming;
+    missions.unshift(mission);
+  } else {
+    const inspection = incoming.inspections[0];
+    const existingInspection = mission.inspections.find((item) => item.id === inspection.id);
+    if (!existingInspection) {
+      mission.inspections.push(inspection);
+    } else if (inspection.result === "Fail") {
+      Object.assign(existingInspection, inspection);
+    }
+    mission.orbitEventIds = [...new Set([...(mission.orbitEventIds || []), ...incoming.orbitEventIds])];
+    mission.status = incoming.status === "Complete" ? "Complete" : mission.status;
+    mission.endTime = incoming.endTime || mission.endTime;
+    mission.eventId = mission.eventId || incoming.eventId;
+  }
+  return { mission, tickets: createTicketsForMission(mission) };
+}
+
+function requestHeader(request, name) {
+  if (typeof request.headers?.get === "function") return request.headers.get(name);
+  const value = request.headers?.[name.toLowerCase()] ?? request.headers?.[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function orbitConfig() {
+  return loadOrbitConfig(process.env, plants.map((plant) => plant.id));
+}
+
+function hasAdminAccess(request, config) {
+  if (!config.adminToken) return false;
+  const supplied = Buffer.from(String(requestHeader(request, "authorization") || ""));
+  const expected = Buffer.from(`Bearer ${config.adminToken}`);
+  return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+}
+
+function publicEventRecord(entry) {
+  return {
+    schemaVersion: entry.schemaVersion,
+    eventId: entry.eventId,
+    eventType: entry.eventType,
+    occurredAt: entry.occurredAt,
+    receivedAt: entry.receivedAt,
+    signature: entry.signature,
+    runEvent: entry.runEvent,
+    projection: entry.projection,
+    archive: entry.archive,
+    projectedAt: entry.projectedAt,
+  };
+}
+
 function svgAttachment(attachmentId, missionId) {
   const safeAttachment = attachmentId.replace(/[^a-zA-Z0-9-]/g, "");
   const safeMission = missionId.replace(/[^a-zA-Z0-9-]/g, "");
@@ -247,14 +262,23 @@ async function handleApi(request, response, url) {
   const pathname = url.pathname;
 
   if (request.method === "GET" && pathname === "/api/health") {
+    const config = orbitConfig();
     return sendJson(response, 200, {
-      status: "ok",
+      status: config.errors.length ? "degraded" : "ok",
       services: [
-        { name: "Orbit webhook", status: "Listening", detail: "action completion events" },
-        { name: "Litmus mapping", status: "Healthy", detail: "SPOT payload v1.0" },
-        { name: "ARCH delivery", status: "Healthy", detail: "99.8% successful · 24h" },
+        {
+          name: "Orbit webhook",
+          status: config.errors.length ? "Configuration required" : "Listening",
+          detail: config.secret ? "HMAC verification enabled" : "unsigned development mode",
+        },
+        {
+          name: "Event archive",
+          status: config.sinkUrl ? "Durable sink configured" : "Prototype only",
+          detail: config.sinkUrl ? "retry-safe HTTP delivery" : "in-memory records are ephemeral",
+        },
+        { name: "ARCH projection", status: "Ready", detail: "Orbit action event v1" },
       ],
-      lastDeliveryAt: integrationLogs.find((log) => log.stage === "ARCH delivery")?.time || null,
+      lastDeliveryAt: integrationLogs.find((log) => log.stage === "ARCH projection")?.time || null,
     });
   }
 
@@ -301,34 +325,133 @@ async function handleApi(request, response, url) {
     return sendJson(response, 200, { data: integrationLogs.slice(0, 25) });
   }
 
+  if (request.method === "GET" && pathname === "/api/webhooks/orbit/status") {
+    const config = orbitConfig();
+    return sendJson(response, config.errors.length ? 503 : 200, {
+      status: config.errors.length ? "configuration_required" : "ready",
+      signatureVerification: config.secret ? "required" : "disabled_for_development",
+      storage: config.sinkUrl ? "external_http_sink" : "ephemeral_memory",
+      supportedEventTypes: [...config.supportedEventTypes],
+      metrics: orbitEventStore.summary(),
+      configurationErrors: config.errors,
+    });
+  }
+
+  if (request.method === "GET" && pathname === "/api/webhooks/orbit/events") {
+    const config = orbitConfig();
+    if (!config.adminToken) {
+      return sendJson(response, 503, { error: "ORBIT_ADMIN_TOKEN is not configured" });
+    }
+    if (!hasAdminAccess(request, config)) return sendJson(response, 401, { error: "Unauthorized" });
+    const requestedLimit = Number(url.searchParams.get("limit") || 25);
+    const limit = Number.isInteger(requestedLimit) && requestedLimit > 0 ? requestedLimit : 25;
+    return sendJson(response, 200, { data: orbitEventStore.list(limit).map(publicEventRecord) });
+  }
+
   if (request.method === "POST" && pathname === "/api/webhooks/orbit") {
+    const config = orbitConfig();
+    if (config.errors.length) {
+      return sendJson(response, 503, {
+        error: "Orbit webhook is not configured",
+        code: "invalid_webhook_configuration",
+        details: config.errors,
+      });
+    }
+
+    if (!String(requestHeader(request, "content-type") || "").toLowerCase().includes("application/json")) {
+      return sendJson(response, 415, { error: "Content-Type must be application/json", code: "unsupported_media_type" });
+    }
+
     const payload = await readJson(request);
-    const errors = validateWebhook(payload);
-    if (errors.length) {
-      const correlationId = payload.data?.correlationId || `corr-rejected-${Date.now().toString(36)}`;
-      addLog({ eventId: payload.eventId || "unavailable", correlationId, stage: "Orbit webhook", outcome: "Rejected", detail: errors.join("; ") });
-      return sendJson(response, 400, { error: "Webhook validation failed", details: errors, correlationId });
+    let signature = { verified: false, sentAt: null };
+    if (config.secret) {
+      signature = verifyOrbitSignature({
+        payload,
+        signatureHeader: requestHeader(request, "orbit-signature"),
+        secret: config.secret,
+        toleranceMs: config.signatureToleranceMs,
+      });
+    }
+    validateOrbitEnvelope(payload, config.supportedEventTypes);
+
+    const normalized = normalizeOrbitEvent(payload, config, {
+      receivedAt: new Date().toISOString(),
+      signatureVerified: signature.verified,
+      signatureSentAt: signature.sentAt,
+    });
+    const reservation = orbitEventStore.reserve(normalized.record);
+    const entry = reservation.entry;
+    const correlationId = `orbit-${payload.uuid}`;
+
+    if (config.sinkUrl && entry.archive.status !== "delivered") {
+      try {
+        const delivery = await deliverToEventSink(entry, config);
+        orbitEventStore.markArchive(payload.uuid, {
+          status: "delivered",
+          attempts: entry.archive.attempts + 1,
+          deliveredAt: new Date().toISOString(),
+          statusCode: delivery.statusCode,
+          lastError: null,
+        });
+      } catch (error) {
+        orbitEventStore.markArchive(payload.uuid, {
+          status: "failed",
+          attempts: entry.archive.attempts + 1,
+          lastError: error.message,
+        });
+        addLog({ eventId: payload.uuid, correlationId, stage: "Orbit archive", outcome: "Retry requested", detail: error.message });
+        return sendJson(response, 503, {
+          error: "Orbit event could not be archived; retry is safe",
+          code: "event_sink_unavailable",
+          eventId: payload.uuid,
+          correlationId,
+        });
+      }
     }
 
-    if (processedEventIds.has(payload.eventId)) {
-      const existing = missions.find((mission) => mission.eventId === payload.eventId);
-      const correlationId = existing?.correlationId || payload.data.correlationId || "unavailable";
-      addLog({ eventId: payload.eventId, correlationId, stage: "Orbit webhook", outcome: "Duplicate ignored", detail: "No duplicate mission or ticket created" });
-      return sendJson(response, 200, { duplicate: true, missionId: existing?.id || payload.data.missionId, correlationId });
+    let projection = null;
+    if (normalized.mission && !entry.projectedAt) {
+      projection = projectOrbitMission(normalized.mission);
+      orbitEventStore.markProjected(payload.uuid);
+      addLog({
+        eventId: payload.uuid,
+        correlationId,
+        stage: "ARCH projection",
+        outcome: "Projected",
+        detail: `${normalized.record.runEvent.actionName}${projection.tickets.length ? `; ${projection.tickets.length} ticket created` : ""}`,
+      });
+    } else if (!normalized.mission) {
+      addLog({
+        eventId: payload.uuid,
+        correlationId,
+        stage: "ARCH projection",
+        outcome: "Pending mapping",
+        detail: normalized.record.projection.missingFields.join(", "),
+      });
     }
 
-    if (missions.some((mission) => mission.id === payload.data.missionId)) {
-      return sendJson(response, 409, { error: "Mission ID already exists with a different event ID" });
+    if (reservation.duplicate) {
+      addLog({ eventId: payload.uuid, correlationId, stage: "Orbit webhook", outcome: "Duplicate acknowledged", detail: "No duplicate action or ticket created" });
+      return sendJson(response, 200, {
+        accepted: true,
+        duplicate: true,
+        eventId: payload.uuid,
+        correlationId,
+        projection: entry.projection.status,
+      });
     }
 
-    const normalized = normalizeWebhook(payload);
-    missions.unshift(normalized);
-    processedEventIds.add(payload.eventId);
-    const tickets = createTicketsForMission(normalized);
-    addLog({ eventId: payload.eventId, correlationId: normalized.correlationId, stage: "ARCH delivery", outcome: "Delivered", detail: `Mission accepted${tickets.length ? `; ${tickets.length} ticket created` : ""}` });
-    addLog({ eventId: payload.eventId, correlationId: normalized.correlationId, stage: "Litmus mapping", outcome: "Mapped", detail: `${normalized.inspections.length} inspections normalized` });
-    addLog({ eventId: payload.eventId, correlationId: normalized.correlationId, stage: "Orbit webhook", outcome: "Validated", detail: payload.eventType });
-    return sendJson(response, 201, { duplicate: false, mission: missionView(normalized), tickets, correlationId: normalized.correlationId });
+    addLog({ eventId: payload.uuid, correlationId, stage: "Orbit webhook", outcome: "Captured", detail: payload.type });
+    return sendJson(response, 202, {
+      accepted: true,
+      duplicate: false,
+      eventId: payload.uuid,
+      correlationId,
+      archive: config.sinkUrl ? "delivered" : "ephemeral",
+      projection: normalized.record.projection.status,
+      missionId: projection?.mission.id || normalized.mission?.id || null,
+      tickets: projection?.tickets || [],
+    });
   }
 
   const attachmentMatch = pathname.match(/^\/api\/attachments\/([^/]+)\/download$/);
@@ -394,7 +517,13 @@ const server = http.createServer(async (request, response) => {
     if (request.method !== "GET" && request.method !== "HEAD") return sendJson(response, 405, { error: "Method not allowed" });
     serveStatic(response, url.pathname);
   } catch (error) {
-    if (!response.writableEnded) sendJson(response, error.statusCode || 500, { error: error.message || "Unexpected server error" });
+    if (!response.writableEnded) {
+      sendJson(response, error.statusCode || 500, {
+        error: error.message || "Unexpected server error",
+        ...(error.code ? { code: error.code } : {}),
+        ...(error.details ? { details: error.details } : {}),
+      });
+    }
   }
 });
 
@@ -404,4 +533,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, handleApi, sendJson, missionResult, missionView, validateWebhook };
+module.exports = { server, handleApi, sendJson, missionResult, missionView, projectOrbitMission };
