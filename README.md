@@ -27,6 +27,7 @@ npm.cmd run check
 ## Included capabilities
 
 - SPOT overview and Tickets experience with responsive ARCH-inspired navigation
+- Niagara presentation-derived design system with Aptos typography, branded blue/orange/green accents, system-aware light and dark modes, and a persistent theme toggle
 - Plant, mission status, date-range, and Mission ID filtering on Tickets; Overview also supports robot filtering
 - Mission, inspection, failure, and open-ticket KPI cards scoped to the active filters
 - Equal-width weekly mission and inspection trend cards

@@ -5,7 +5,8 @@
   "description": "ARCH SPOT mission monitoring prototype based on the SPOT ARCH BRD",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check server-data.js && node --check api/index.js && node --check public/app.js && node --check orbit/config.js && node --check orbit/normalize.js && node --check orbit/signature.js && node --check orbit/store.js && node --check scripts/send-orbit-webhook.js && node tests/orbit-webhook.js && node tests/vercel-smoke.js",
+    "check": "node --check server.js && node --check server-data.js && node --check api/index.js && node --check public/app.js && node --check orbit/config.js && node --check orbit/normalize.js && node --check orbit/signature.js && node --check orbit/store.js && node --check scripts/send-orbit-webhook.js && node tests/theme-smoke.js && node tests/orbit-webhook.js && node tests/vercel-smoke.js",
+    "test:theme": "node tests/theme-smoke.js",
     "test:orbit": "node tests/orbit-webhook.js",
     "test:vercel": "node tests/vercel-smoke.js",
     "webhook:send": "node scripts/send-orbit-webhook.js"

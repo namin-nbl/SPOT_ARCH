@@ -15,6 +15,37 @@ const sidebar = document.querySelector("#sidebar");
 const mobileScrim = document.querySelector("#mobile-scrim");
 const alertDialog = document.querySelector("#alert-dialog");
 const previewDialog = document.querySelector("#preview-dialog");
+const themeToggle = document.querySelector("#theme-toggle");
+const themeIconUse = document.querySelector("#theme-icon-use");
+const themeColorMeta = document.querySelector("#theme-color");
+const themePreference = window.matchMedia?.("(prefers-color-scheme: dark)");
+
+function storedTheme() {
+  try {
+    const value = localStorage.getItem("arch-spot-theme");
+    return value === "light" || value === "dark" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function applyTheme(theme, { persist = true } = {}) {
+  const nextTheme = theme === "dark" ? "dark" : "light";
+  const targetTheme = nextTheme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = nextTheme;
+  themeIconUse?.setAttribute("href", `#icon-${targetTheme === "dark" ? "moon" : "sun"}`);
+  if (themeToggle) {
+    const label = `Switch to ${targetTheme} mode`;
+    themeToggle.setAttribute("aria-label", label);
+    themeToggle.title = label;
+  }
+  if (themeColorMeta) themeColorMeta.content = nextTheme === "dark" ? "#071824" : "#ffffff";
+  if (persist) {
+    try { localStorage.setItem("arch-spot-theme", nextTheme); } catch {}
+  }
+}
+
+applyTheme(document.documentElement.dataset.theme, { persist: false });
 
 function icon(name, className = "") {
   return `<svg class="${className}" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
@@ -714,6 +745,12 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.querySelector("#menu-button").addEventListener("click", openMobileNav);
+themeToggle.addEventListener("click", () => {
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+});
+themePreference?.addEventListener?.("change", (event) => {
+  if (!storedTheme()) applyTheme(event.matches ? "dark" : "light", { persist: false });
+});
 mobileScrim.addEventListener("click", closeMobileNav);
 document.querySelector("#preview-close").addEventListener("click", () => previewDialog.close());
 previewDialog.addEventListener("close", () => { document.querySelector("#preview-frame").src = "about:blank"; });
